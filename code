@@ -1,0 +1,571 @@
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include "DHT.h"
+
+// =====================================
+// WIFI CREDENTIALS
+// =====================================
+
+const char* WIFI_SSID = "Galaxy A52 5G 04E3";
+const char* WIFI_PASSWORD = "ssbq1970";
+
+// =====================================
+// SUPABASE CREDENTIALS
+// =====================================
+
+const char* SUPABASE_URL =
+  "https://wnloqysmciblooxoisnl.supabase.co";
+
+const char* SUPABASE_KEY =
+  "sb_publishable_gqap347K-z2NLBc5vbPiEg_J6I5XpZA";
+
+// =====================================
+// ESP32 WROOM PINS
+// =====================================
+
+#define PIR_PIN 27
+#define DHT_PIN 4
+#define FAN_PIN 18
+
+#define DHT_TYPE DHT22
+
+DHT dht(DHT_PIN, DHT_TYPE);
+
+// =====================================
+// PWM
+// =====================================
+
+#define PWM_FREQ 25000
+#define PWM_RESOLUTION 8
+
+// =====================================
+// TIMING
+// =====================================
+
+const unsigned long DHT_INTERVAL = 2000;
+const unsigned long CONTROL_INTERVAL = 2000;
+const unsigned long UPLOAD_INTERVAL = 5000;
+const unsigned long WIFI_RETRY_INTERVAL = 10000;
+const unsigned long PIR_DEBOUNCE = 300;
+
+// =====================================
+// FAN VARIABLES
+// =====================================
+
+bool autoMode = true;
+bool manualFanOn = false;
+bool fanOn = false;
+
+bool pirToggleState = false;
+
+int manualSpeed = 50;
+int speedPercent = 0;
+int pwmValue = 0;
+
+// =====================================
+// SENSOR VARIABLES
+// =====================================
+
+float temperature = 25.0;
+float humidity = 0.0;
+
+bool dhtValid = false;
+bool pirValue = false;
+
+int previousPirState = LOW;
+
+// =====================================
+// TIMERS
+// =====================================
+
+unsigned long lastDHTRead = 0;
+unsigned long lastControlFetch = 0;
+unsigned long lastUpload = 0;
+unsigned long lastWiFiAttempt = 0;
+unsigned long lastMotionEvent = 0;
+
+// =====================================
+// FAN PWM FUNCTION
+// =====================================
+
+void setFanSpeed(int percent) {
+
+  percent = constrain(percent, 0, 100);
+
+  speedPercent = percent;
+
+  pwmValue = map(percent, 0, 100, 0, 255);
+
+  ledcWrite(FAN_PIN, pwmValue);
+
+  fanOn = (percent > 0);
+
+  Serial.print("APPLIED SPEED: ");
+  Serial.print(speedPercent);
+  Serial.print("% | PWM: ");
+  Serial.println(pwmValue);
+}
+
+// =====================================
+// AUTOMATIC FAN SPEED
+// =====================================
+
+int calculateFanSpeed() {
+
+  if (temperature < 25) {
+    return 30;
+  }
+  else if (temperature < 30) {
+    return 50;
+  }
+  else if (temperature < 35) {
+    return 75;
+  }
+  else {
+    return 100;
+  }
+}
+
+// =====================================
+// UPDATE FAN
+// =====================================
+
+void updateFan() {
+
+  if (autoMode) {
+
+    Serial.println("CURRENT MODE: AUTO");
+
+    if (pirToggleState && dhtValid) {
+
+      setFanSpeed(calculateFanSpeed());
+
+    }
+    else {
+
+      setFanSpeed(0);
+
+    }
+  }
+
+  else {
+
+    Serial.println("CURRENT MODE: MANUAL");
+
+    if (manualFanOn && manualSpeed > 0) {
+
+      setFanSpeed(manualSpeed);
+
+    }
+    else {
+
+      setFanSpeed(0);
+
+    }
+  }
+}
+
+// =====================================
+// READ DHT22
+// =====================================
+
+void readDHT() {
+
+  unsigned long now = millis();
+
+  if (now - lastDHTRead >= DHT_INTERVAL) {
+
+    lastDHTRead = now;
+
+    float newTemp = dht.readTemperature();
+    float newHumidity = dht.readHumidity();
+
+    if (!isnan(newTemp) && !isnan(newHumidity)) {
+
+      temperature = newTemp;
+      humidity = newHumidity;
+
+      dhtValid = true;
+
+      Serial.print("Temperature: ");
+      Serial.print(temperature);
+
+      Serial.print(" C | Humidity: ");
+      Serial.print(humidity);
+
+      Serial.println("%");
+
+    }
+    else {
+
+      dhtValid = false;
+
+      Serial.println("DHT22 ERROR");
+
+    }
+
+    updateFan();
+  }
+}
+
+// =====================================
+// PIR MOTION DETECTION
+// =====================================
+
+void readPIR() {
+
+  unsigned long now = millis();
+
+  int currentPIR = digitalRead(PIR_PIN);
+
+  pirValue = (currentPIR == HIGH);
+
+  if (currentPIR == HIGH &&
+      previousPirState == LOW &&
+      now - lastMotionEvent >= PIR_DEBOUNCE) {
+
+    lastMotionEvent = now;
+
+    if (autoMode) {
+
+      pirToggleState = !pirToggleState;
+
+      Serial.println(
+        pirToggleState ?
+        "MOTION DETECTED - FAN ON" :
+        "MOTION DETECTED - FAN OFF"
+      );
+
+      updateFan();
+    }
+  }
+
+  previousPirState = currentPIR;
+}
+
+// =====================================
+// FETCH SUPABASE CONTROL SETTINGS
+// =====================================
+
+void fetchFanSettings() {
+
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+
+  String url = String(SUPABASE_URL) +
+    "/rest/v1/fan_control?id=eq.1&select=mode,fan_speed,manual_fan_on";
+
+  if (!http.begin(client, url)) {
+    Serial.println("HTTP BEGIN FAILED");
+    return;
+  }
+
+  http.addHeader("apikey", SUPABASE_KEY);
+
+  http.addHeader(
+    "Authorization",
+    String("Bearer ") + SUPABASE_KEY
+  );
+
+  http.addHeader("Accept", "application/json");
+
+  Serial.println("\nFETCHING SUPABASE CONTROL...");
+
+  int httpCode = http.GET();
+
+  Serial.print("SUPABASE HTTP CODE: ");
+  Serial.println(httpCode);
+
+  if (httpCode == 200) {
+
+    String response = http.getString();
+
+    Serial.print("SUPABASE RESPONSE: ");
+    Serial.println(response);
+
+    JsonDocument doc;
+
+    DeserializationError error =
+      deserializeJson(doc, response);
+
+    if (error) {
+
+      Serial.print("JSON ERROR: ");
+      Serial.println(error.c_str());
+
+    }
+    else {
+
+      JsonArray arr = doc.as<JsonArray>();
+
+      Serial.print("ROWS RECEIVED: ");
+      Serial.println(arr.size());
+
+      if (arr.size() > 0) {
+
+        String receivedMode = arr[0]["mode"] | "AUTO";
+
+        int receivedSpeed = arr[0]["fan_speed"] | 50;
+
+        bool receivedFanOn =
+          arr[0]["manual_fan_on"] | false;
+
+        receivedMode.trim();
+        receivedMode.toUpperCase();
+
+        if (receivedMode == "AUTO") {
+
+          autoMode = true;
+
+        }
+        else if (receivedMode == "MANUAL") {
+
+          autoMode = false;
+
+        }
+        else {
+
+          Serial.println("INVALID MODE");
+          http.end();
+          return;
+
+        }
+
+        manualSpeed = constrain(receivedSpeed, 0, 100);
+
+        manualFanOn = receivedFanOn;
+
+        Serial.println("SUPABASE SETTINGS UPDATED");
+
+        Serial.print("MODE: ");
+        Serial.println(receivedMode);
+
+        Serial.print("MANUAL SPEED: ");
+        Serial.println(manualSpeed);
+
+        Serial.print("MANUAL FAN: ");
+        Serial.println(manualFanOn ? "ON" : "OFF");
+
+        updateFan();
+
+      }
+      else {
+
+        Serial.println("NO CONTROL ROW FOUND");
+
+      }
+    }
+  }
+  else {
+
+    Serial.println("SUPABASE GET FAILED");
+
+    if (httpCode > 0) {
+      Serial.println(http.getString());
+    }
+  }
+
+  http.end();
+}
+
+// =====================================
+// UPLOAD SENSOR DATA
+// =====================================
+
+void uploadSensorData() {
+
+  if (WiFi.status() != WL_CONNECTED || !dhtValid) {
+    return;
+  }
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+
+  String url = String(SUPABASE_URL) +
+    "/rest/v1/sensor_data";
+
+  if (!http.begin(client, url)) {
+    return;
+  }
+
+  http.addHeader("apikey", SUPABASE_KEY);
+
+  http.addHeader(
+    "Authorization",
+    String("Bearer ") + SUPABASE_KEY
+  );
+
+  http.addHeader("Content-Type", "application/json");
+
+  http.addHeader("Prefer", "return=minimal");
+
+  JsonDocument doc;
+
+  doc["temperature"] = temperature;
+  doc["humidity"] = humidity;
+  doc["pir"] = pirValue;
+  doc["fan_speed"] = speedPercent;
+
+  String payload;
+
+  serializeJson(doc, payload);
+
+  Serial.print("UPLOADING: ");
+  Serial.println(payload);
+
+  int httpCode = http.POST(payload);
+
+  Serial.print("UPLOAD HTTP CODE: ");
+  Serial.println(httpCode);
+
+  if (httpCode >= 200 && httpCode < 300) {
+    Serial.println("UPLOAD SUCCESS");
+  }
+  else {
+    Serial.println("UPLOAD FAILED");
+
+    if (httpCode > 0) {
+      Serial.println(http.getString());
+    }
+  }
+
+  http.end();
+}
+
+// =====================================
+// WIFI CONNECTION
+// =====================================
+
+void maintainWiFi() {
+
+  if (WiFi.status() == WL_CONNECTED) {
+    return;
+  }
+
+  if (millis() - lastWiFiAttempt >= WIFI_RETRY_INTERVAL) {
+
+    lastWiFiAttempt = millis();
+
+    Serial.println("RECONNECTING WIFI...");
+
+    WiFi.disconnect();
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  }
+}
+
+// =====================================
+// PRINT STATUS
+// =====================================
+
+void printStatus() {
+
+  Serial.println("\n========== FAN STATUS ==========");
+
+  Serial.print("WiFi: ");
+  Serial.println(WiFi.status() == WL_CONNECTED ?
+                 "CONNECTED" : "DISCONNECTED");
+
+  Serial.print("Mode: ");
+  Serial.println(autoMode ? "AUTO" : "MANUAL");
+
+  Serial.print("Temperature: ");
+  Serial.println(temperature);
+
+  Serial.print("Humidity: ");
+  Serial.println(humidity);
+
+  Serial.print("PIR: ");
+  Serial.println(pirValue ? "DETECTED" : "NO MOTION");
+
+  Serial.print("PIR Toggle: ");
+  Serial.println(pirToggleState ? "ON" : "OFF");
+
+  Serial.print("Manual Switch: ");
+  Serial.println(manualFanOn ? "ON" : "OFF");
+
+  Serial.print("Manual Speed: ");
+  Serial.println(manualSpeed);
+
+  Serial.print("Fan: ");
+  Serial.println(fanOn ? "ON" : "OFF");
+
+  Serial.print("Actual Speed: ");
+  Serial.println(speedPercent);
+
+  Serial.print("PWM: ");
+  Serial.println(pwmValue);
+
+  Serial.println("================================");
+}
+
+// =====================================
+// SETUP
+// =====================================
+
+void setup() {
+
+  Serial.begin(115200);
+
+  pinMode(PIR_PIN, INPUT);
+
+  dht.begin();
+
+  if (!ledcAttach(FAN_PIN, PWM_FREQ, PWM_RESOLUTION)) {
+    Serial.println("PWM ATTACH FAILED");
+  }
+
+  ledcWrite(FAN_PIN, 0);
+
+  Serial.println("\nSMART FAN SYSTEM STARTING");
+
+  WiFi.mode(WIFI_STA);
+
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  lastWiFiAttempt = millis();
+}
+
+// =====================================
+// MAIN LOOP
+// =====================================
+
+void loop() {
+
+  unsigned long now = millis();
+
+  maintainWiFi();
+
+  readDHT();
+
+  readPIR();
+
+  if (WiFi.status() == WL_CONNECTED &&
+      now - lastControlFetch >= CONTROL_INTERVAL) {
+
+    lastControlFetch = now;
+
+    fetchFanSettings();
+  }
+
+  if (WiFi.status() == WL_CONNECTED &&
+      now - lastUpload >= UPLOAD_INTERVAL) {
+
+    lastUpload = now;
+
+    uploadSensorData();
+
+    printStatus();
+  }
+
+  delay(50);
+}
