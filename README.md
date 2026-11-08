@@ -1,4 +1,4 @@
-# smart-iot-fan-control-system
+# Smart-Iot-Fan-Control-System
 An IoT-based smart fan control system using ESP32-WROOM, DHT22, PIR sensor, PWM and Supabase for real-time monitoring, automatic temperature-based operation and remote manual fan speed control.
 #Project Overview
 The Smart IoT Fan Control System is an IoT-based automation project designed to monitor environmental conditions and control fan operation using an ESP32-WROOM microcontroller.
@@ -48,6 +48,11 @@ Wi-Fi Communication
 ArduinoJson Library
 
 PWM Control
+
+<img width="420" height="1000" alt="WhatsApp Image 2026-11-07 at 23 33 01" src="https://github.com/user-attachments/assets/fb06fa00-c9ee-435f-b9bf-86bf01e35f7f" />
+
+<img width="420" height="1000" alt="WhatsApp Image 2026-11-07 at 23 32 36" src="https://github.com/user-attachments/assets/ebcbc7f6-81b5-4708-a276-a01276a56cb6" />
+
 
 Working Principle
 
