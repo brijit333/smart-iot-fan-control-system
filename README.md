@@ -130,4 +130,8 @@ Improved security and authentication
 
 Hardware and firmware integration with Supabase-based monitoring and control.
 
+# DEMO VIDEO
+
+https://drive.google.com/file/d/11jAxGZ0jxBjReV9UntOIO73JEna0xXvK/view?usp=drivesdk
+
 
