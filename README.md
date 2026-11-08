@@ -32,6 +32,8 @@ MOSFET / Motor Driver
 External Power Supply
 
 Connecting Wires
+<img width="1280" height="576" alt="image" src="https://github.com/user-attachments/assets/1552a6c1-960e-476a-9117-357abd6af5b9" />
+
 
 # Software and Technologies
 
